@@ -1086,7 +1086,18 @@ pub fn specs() -> Vec<CommandSpec> {
             let id = active(s, "history.restore")?;
             let i = f64_req(p, "index", "history.restore")? as usize;
             let st = s.catalog.photo(id).and_then(|ph| ph.history.get(i).cloned()).ok_or_else(|| bad("history.restore", "no such step"))?;
-            s.set_develop(id, (*st.settings).clone(), &format!("History: {}", st.label))?;
+            if s.develop_of(id).is_some_and(|current| *current == *st.settings) {
+                return ok();
+            }
+            // Choosing a history step changes the current look, not the history
+            // itself. set_develop() would append another "History: ..." step each
+            // time, eventually creating an endlessly nested list of restores.
+            // Commit only SetDevelop: the choice is still undoable.
+            let edited = (s.clock)();
+            s.commit(
+                "Go to History Step",
+                Op::SetDevelop { id, settings: st.settings, label: "Go to History Step".into(), edited: Some(edited) },
+            )?;
             ok()
         }),
         // ---- interactions (slider drags, brush strokes)

@@ -41,6 +41,32 @@ fn changing_one_wb_control_resolves_as_shot_without_stale_tint() {
 /// reduction included (#763: reset left both at 0 while import sets 40 / 25); a rendered file
 /// keeps none.
 #[test]
+fn restoring_history_step_does_not_append_recursive_history_entries() {
+    let mut s = demo();
+    let id = s.active().unwrap();
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 0.5})).unwrap();
+    let earlier = active_dev(&s);
+    s.execute("develop.set", &json!({"control": "light.exposure", "value": 1.0})).unwrap();
+    let latest = active_dev(&s);
+    let history = s.catalog.photo(id).unwrap().history.clone();
+    let index = history.len() - 2;
+    let undo_before = s.undo.len();
+
+    s.execute("history.restore", &json!({"index": index})).unwrap();
+    assert_eq!(active_dev(&s), earlier);
+    assert_eq!(s.catalog.photo(id).unwrap().history, history, "selecting history must not append a step");
+    assert_eq!(s.undo.len(), undo_before + 1, "history navigation remains undoable");
+
+    s.execute("history.restore", &json!({"index": index})).unwrap();
+    assert_eq!(s.catalog.photo(id).unwrap().history, history);
+    assert_eq!(s.undo.len(), undo_before + 1, "clicking the active step is a no-op");
+
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(active_dev(&s), latest, "undo restores the look before history navigation");
+    assert_eq!(s.catalog.photo(id).unwrap().history, history);
+}
+
+#[test]
 fn reset_edits_restores_a_raws_import_defaults() {
     use lightcraft_catalog::{Photo, PhotoId, Source};
     use lightcraft_develop::DevelopSettings;

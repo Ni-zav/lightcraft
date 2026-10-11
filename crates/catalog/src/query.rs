@@ -364,19 +364,30 @@ impl Catalog {
     pub fn query(&self, filter: &Filter, sort: &Sort) -> Vec<PhotoId> {
         let root = filter.library_root();
         let mut v: Vec<&Photo> = self.photos().map(|p| p.as_ref()).filter(|p| filter.matches_in(p, self, root.as_deref())).collect();
-        v.sort_by(|a, b| {
-            let o = match sort.key {
-                SortKey::CaptureDate => a.captured.cmp(&b.captured).then_with(|| a.imported.cmp(&b.imported)),
-                SortKey::ImportDate => a.imported.cmp(&b.imported),
-                SortKey::EditDate => a.edited.cmp(&b.edited),
-                SortKey::FileName => a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()),
-                SortKey::Rating => a.rating.cmp(&b.rating),
-                SortKey::FileSize => a.file_size.cmp(&b.file_size),
-                SortKey::Random => shuffle_rank(sort.seed, a.id).cmp(&shuffle_rank(sort.seed, b.id)),
+        if matches!(sort.key, SortKey::FileName) {
+            // Cache one folded name per photo. Folding both names inside the
+            // comparator allocated twice per comparison (O(n log n) strings)
+            // every time a large library's filename sort was rebuilt.
+            // Include the ID in the key to preserve deterministic tie-breaking.
+            v.sort_by_cached_key(|p| (p.file_name.to_lowercase(), p.id));
+            if !sort.ascending {
+                v.reverse();
             }
-            .then(a.id.cmp(&b.id));
-            if sort.ascending { o } else { o.reverse() }
-        });
+        } else {
+            v.sort_by(|a, b| {
+                let o = match sort.key {
+                    SortKey::CaptureDate => a.captured.cmp(&b.captured).then_with(|| a.imported.cmp(&b.imported)),
+                    SortKey::ImportDate => a.imported.cmp(&b.imported),
+                    SortKey::EditDate => a.edited.cmp(&b.edited),
+                    SortKey::FileName => std::cmp::Ordering::Equal, // handled by cached keys above
+                    SortKey::Rating => a.rating.cmp(&b.rating),
+                    SortKey::FileSize => a.file_size.cmp(&b.file_size),
+                    SortKey::Random => shuffle_rank(sort.seed, a.id).cmp(&shuffle_rank(sort.seed, b.id)),
+                }
+                .then(a.id.cmp(&b.id));
+                if sort.ascending { o } else { o.reverse() }
+            });
+        }
         v.into_iter().map(|p| p.id).collect()
     }
 

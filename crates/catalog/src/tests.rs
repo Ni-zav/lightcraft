@@ -124,6 +124,20 @@ fn filter_search_sort() {
 }
 
 #[test]
+fn filename_sort_folds_once_with_stable_id_ties_and_descending_order() {
+    let mut c = Catalog::new();
+    let z = photo(&mut c, "ZED.JPG", "2026-01-01");
+    let a = photo(&mut c, "Alpha.JPG", "2026-01-01");
+    let b = photo(&mut c, "alpha.jpg", "2026-01-01");
+    let mid = photo(&mut c, "bravo.jpg", "2026-01-01");
+    let ascending = Sort { key: SortKey::FileName, ascending: true, ..Default::default() };
+    let descending = Sort { key: SortKey::FileName, ascending: false, ..Default::default() };
+
+    assert_eq!(c.query(&Filter::default(), &ascending), vec![a, b, mid, z]);
+    assert_eq!(c.query(&Filter::default(), &descending), vec![z, mid, b, a]);
+}
+
+#[test]
 fn snapshot_and_log_replay() {
     let mut c = Catalog::new();
     let snap0 = c.to_snapshot();

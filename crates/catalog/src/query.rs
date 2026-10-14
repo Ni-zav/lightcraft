@@ -1,5 +1,7 @@
 //! Filtering, search and sorting.
 
+use std::cmp::Ordering::Equal;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{AlbumId, Catalog, ColorLabel, Flag, MediaKind, Photo, PhotoId};
@@ -251,8 +253,8 @@ impl Filter {
             return false;
         }
         match &self.folder {
-            // browsed photos only show in folder views
-            None if p.local => return false,
+            // browsed photos only show in folder views, and in Recently Deleted once deleted (#1430)
+            None if p.local && !p.deleted => return false,
             None => {}
             Some(dir) => {
                 let crate::Source::File { path } = &p.source else { return false };
@@ -359,35 +361,41 @@ impl Filter {
     }
 }
 
+/// Case-insensitive file name order without allocating (compares per-character lowercase via `char::to_lowercase`).
+pub fn cmp_name(a: &str, b: &str) -> std::cmp::Ordering {
+    a.chars().flat_map(char::to_lowercase).cmp(b.chars().flat_map(char::to_lowercase))
+}
+
 impl Catalog {
-    /// Photos matching `filter`, in `sort` order (ties broken by id for stability).
+    /// Photos matching `filter`, in `sort` order (ties broken by file name, then id).
     pub fn query(&self, filter: &Filter, sort: &Sort) -> Vec<PhotoId> {
         let root = filter.library_root();
         let mut v: Vec<&Photo> = self.photos().map(|p| p.as_ref()).filter(|p| filter.matches_in(p, self, root.as_deref())).collect();
-        if matches!(sort.key, SortKey::FileName) {
-            // Cache one folded name per photo. Folding both names inside the
-            // comparator allocated twice per comparison (O(n log n) strings)
-            // every time a large library's filename sort was rebuilt.
-            // Include the ID in the key to preserve deterministic tie-breaking.
-            v.sort_by_cached_key(|p| (p.file_name.to_lowercase(), p.id));
+        if sort.key == SortKey::FileName {
+            // Match cmp_name's per-character folding, including contextual Unicode cases.
+            v.sort_by_cached_key(|p| (p.file_name.chars().flat_map(char::to_lowercase).collect::<String>(), p.id));
             if !sort.ascending {
                 v.reverse();
             }
-        } else {
-            v.sort_by(|a, b| {
-                let o = match sort.key {
-                    SortKey::CaptureDate => a.captured.cmp(&b.captured).then_with(|| a.imported.cmp(&b.imported)),
-                    SortKey::ImportDate => a.imported.cmp(&b.imported),
-                    SortKey::EditDate => a.edited.cmp(&b.edited),
-                    SortKey::FileName => std::cmp::Ordering::Equal, // handled by cached keys above
-                    SortKey::Rating => a.rating.cmp(&b.rating),
-                    SortKey::FileSize => a.file_size.cmp(&b.file_size),
-                    SortKey::Random => shuffle_rank(sort.seed, a.id).cmp(&shuffle_rank(sort.seed, b.id)),
-                }
-                .then(a.id.cmp(&b.id));
-                if sort.ascending { o } else { o.reverse() }
-            });
+            return v.into_iter().map(|p| p.id).collect();
         }
+        v.sort_by(|a, b| {
+            let o = match sort.key {
+                SortKey::CaptureDate => a.captured.cmp(&b.captured).then_with(|| a.imported.cmp(&b.imported)),
+                SortKey::ImportDate => a.imported.cmp(&b.imported),
+                SortKey::EditDate => a.edited.cmp(&b.edited),
+                SortKey::FileName => cmp_name(&a.file_name, &b.file_name),
+                SortKey::Rating => a.rating.cmp(&b.rating),
+                SortKey::FileSize => a.file_size.cmp(&b.file_size),
+                SortKey::Random => shuffle_rank(sort.seed, a.id).cmp(&shuffle_rank(sort.seed, b.id)),
+            }
+            // Ties (one import batch, a burst within a second, equal ratings) sort by file name, the
+            // order cameras number frames, so the order doesn't depend on how ids were allocated;
+            // the id only keeps it stable.
+            .then_with(|| if sort.key == SortKey::FileName { Equal } else { cmp_name(&a.file_name, &b.file_name) })
+            .then(a.id.cmp(&b.id));
+            if sort.ascending { o } else { o.reverse() }
+        });
         v.into_iter().map(|p| p.id).collect()
     }
 

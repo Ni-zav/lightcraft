@@ -213,12 +213,15 @@ fn disarm(marker: &std::path::Path, active: &Mutex<u32>) {
 }
 
 /// Removes the marker on the way out, a panic included (the process survived).
-struct Armed(Option<PathBuf>);
+struct Armed<'a> {
+    marker: Option<PathBuf>,
+    active: &'a Mutex<u32>,
+}
 
-impl Drop for Armed {
+impl Drop for Armed<'_> {
     fn drop(&mut self) {
-        if let Some(m) = &self.0 {
-            disarm(m, &ACTIVE);
+        if let Some(m) = &self.marker {
+            disarm(m, self.active);
         }
     }
 }
@@ -230,7 +233,7 @@ pub(crate) fn with_marker<T>(what: &str, f: impl FnOnce() -> T) -> T {
     if let Some(m) = &marker {
         arm(m, &ACTIVE, what);
     }
-    let _armed = Armed(marker);
+    let _armed = Armed { marker, active: &ACTIVE };
     f()
 }
 
@@ -352,9 +355,6 @@ mod tests {
     }
     use super::*;
 
-    /// The tests that set the process-wide marker take turns.
-    static GLOBAL: Mutex<()> = Mutex::new(());
-
     #[test]
     fn parses_backend_names() {
         assert_eq!(parse_backends("dx12"), Some(BackendChoice::Use(Backends::DX12)));
@@ -421,13 +421,15 @@ mod tests {
 
     #[test]
     fn init_marker_is_written_during_creation_and_removed_after() {
-        let _turn = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("lc-gpu-marker-{}", std::process::id()));
         let m = dir.join("gpu-init.marker");
         let _ = std::fs::remove_dir_all(&dir);
-        set_init_marker(Some(m.clone()));
-        let seen = with_init_marker(Backends::DX12, || m.exists());
-        set_init_marker(None);
+        // Exercise the same arm/disarm operations with a private counter: device tests run
+        // concurrently and must not extend this test's marker lifetime.
+        let active = Mutex::new(0);
+        arm(&m, &active, "device creation");
+        let seen = m.exists();
+        disarm(&m, &active);
         assert!(seen, "the marker exists while the device is created");
         assert!(!m.exists(), "and is removed afterwards");
         // a marker left behind by a crashed process is reported once; reading it leaves it in place
@@ -505,13 +507,15 @@ mod tests {
 
     #[test]
     fn a_panic_inside_the_scope_still_removes_the_marker() {
-        let _turn = GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("lc-gpu-panic-{}", std::process::id()));
         let m = dir.join("gpu-init.marker");
         let _ = std::fs::remove_dir_all(&dir);
-        set_init_marker(Some(m.clone()));
-        let r = std::panic::catch_unwind(|| with_marker("kernel compilation", || panic!("compile")));
-        set_init_marker(None);
+        let active = Mutex::new(0);
+        let r = std::panic::catch_unwind(|| {
+            arm(&m, &active, "kernel compilation");
+            let _armed = Armed { marker: Some(m.clone()), active: &active };
+            panic!("compile");
+        });
         assert!(r.is_err());
         assert!(!m.exists(), "the process survived, so nothing is left to report");
         let _ = std::fs::remove_dir_all(&dir);
